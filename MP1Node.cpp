@@ -8,10 +8,13 @@
  **********************************/
 
 #include "MP1Node.h"
+#include <csignal>
 
 /*
  * Note: You can change/add any functions in MP1Node.{h,cpp}
  */
+
+unordered_map<int, long> failed;
 
 /**
  * Overloaded Constructor of the MP1Node class
@@ -154,6 +157,15 @@ int MP1Node::introduceSelfToGroup(Address *joinaddr) {
         log->LOG(&memberNode->addr, "Starting up group...");
 #endif
         memberNode->inGroup = true;
+        // add myself to my memberlist
+        int id = 0;
+        short port;
+        setIdAndPortFromAddress(memberNode->addr, &id, &port);
+        MemberListEntry entry = MemberListEntry(id, port, 0, par->getcurrtime());
+        memberNode->memberList.push_back(entry);
+
+        // log to debug log about new node join
+        log->logNodeAdd(&memberNode->addr, &memberNode->addr);
     }
     else {
         size_t msgsize = sizeof(MessageHdr) + sizeof(joinaddr->addr) + sizeof(long) + 1;
@@ -185,9 +197,12 @@ int MP1Node::introduceSelfToGroup(Address *joinaddr) {
 * DESCRIPTION: Wind up this node and clean up state
 */
 int MP1Node::finishUpThisNode(){
-    /*
-     * Your code goes here
-     */
+    memberNode->inited = false;
+    memberNode->inGroup = false;
+    memberNode->nnb = 0;
+    memberNode->heartbeat = 0;
+    memberNode->memberList.clear();
+    return 0;
 }
 
 /**
@@ -240,9 +255,59 @@ void MP1Node::checkMessages() {
  * DESCRIPTION: Message handler for different message types
  */
 bool MP1Node::recvCallBack(void *env, char *data, int size ) {
-    /*
-    * Your code goes here
-    */
+    // Get msg header from msg
+    MessageHdr header;
+    memcpy(&header, data, sizeof(MessageHdr));
+
+    // Perform different functions based on different msg type
+    if (header.msgType == JOINREQ) {
+        // deserialize msg from memory
+        Address addr;
+        addr.init();
+        long heartbeat = 0;
+        memcpy(&addr.addr, data + sizeof(MessageHdr), sizeof(addr.addr));
+        memcpy(&heartbeat, data + sizeof(MessageHdr) + sizeof(addr.addr), sizeof(long));
+
+        // add to my memberlist
+        int id = 0;
+        short port;
+        setIdAndPortFromAddress(addr, &id, &port);
+        MemberListEntry entry = MemberListEntry(id, port, heartbeat, par->getcurrtime());
+        memberNode->memberList.push_back(entry);
+
+        // log to debug log about new node join
+        log->logNodeAdd(&memberNode->addr, &addr);
+
+        // send joinrep msg that includes my memberlist
+        sendJoinRepMsg(&addr);
+    } else if (header.msgType == JOINREP) {
+        // Since I received JOINREP, I've made myself known so I'm in the group
+        memberNode->inGroup = true;
+        // We just joined, so we should use introducer's membership list and clear anything previously stored.
+        memberNode->memberList.clear();
+
+        // Now we deserialize the msg and update my member list
+        deserializeAndUpdateMemberList(data, size);
+    } else if (header.msgType == UPDATEREQ) {
+        // update membership list, add any new nodes, log
+        deserializeAndUpdateMemberList(data, size);
+    }
+}
+
+void MP1Node::sendJoinRepMsg(Address *toAddr) {
+    // Create the msg that includes header and my member list entires
+    int mleSize = sizeof(int) + sizeof(short) + sizeof(long) + sizeof(long), numEntries = memberNode->memberList.size();
+    size_t msgsize = sizeof(MessageHdr) + mleSize * numEntries;
+
+    MessageHdr *msg;
+    msg = (MessageHdr *) malloc(msgsize * sizeof(char));
+    msg->msgType = JOINREP;
+
+    serializeMemberList(msg);
+    // Reply with JOINREP message
+    emulNet->ENsend(&memberNode->addr, toAddr, (char *)msg, msgsize);
+
+    free(msg);
 }
 
 /**
@@ -253,13 +318,143 @@ bool MP1Node::recvCallBack(void *env, char *data, int size ) {
 *                 Propagate your membership list
 */
 void MP1Node::nodeLoopOps() {
-    
-    /*
-     * Your code goes here
-     */
+    long currTime = par->getcurrtime();
+    auto shouldSendGossip = (currTime - timeLastGossip) >= TGOSSIP && memberNode->memberList.size() > 0;
+
+    // select a random neighbour and send gossip
+    if (shouldSendGossip) {
+        memberNode->heartbeat++;
+        timeLastGossip = currTime;
+        int index = rand() % memberNode->memberList.size();
+        auto neighbour = memberNode->memberList[index];
+        Address neighbourAddr = createAddressFromIdAndPort(neighbour.id, neighbour.port);
+        sendGossip(&neighbourAddr);
+    }
+
+    int id = 0;
+    short port = 0;
+    setIdAndPortFromAddress(memberNode->addr, &id, &port);
+
+    // update any node that has failed, remove any failed nodes that are passed Tcleanup
+    // If a node's heartbeat hasn't increased for more than Tfail (currentTime - node.timestamp), we mark it as failed
+    // if a node is marked as failed for more than Tcleanup, remove the node from list, and log
+    auto neighbour = memberNode->memberList.begin();
+    while (neighbour != memberNode->memberList.end()) {
+        Address neighbourAddr = createAddressFromIdAndPort(neighbour->id, neighbour->port);
+        if (areAddressesEqual(memberNode->addr, neighbourAddr)) {
+            neighbour++;
+            continue;
+        }
+
+        auto hasFailed = failed.count(neighbour->id) != 0;
+        long timeSinceLastUpdate = currTime - neighbour->timestamp;
+        if (hasFailed && currTime - failed[neighbour->id] >= TREMOVE) { // remove node
+            neighbour = memberNode->memberList.erase(neighbour);
+            failed.erase(neighbour->id);
+            log->logNodeRemove(&(memberNode->addr), &neighbourAddr);
+            continue;
+        }
+
+        if (!hasFailed && timeSinceLastUpdate >= TFAIL) { // if node has failed, we don't send msg to it
+            failed[neighbour->id] = currTime;
+            hasFailed = true;
+        }
+        neighbour++;
+    }
 
     return;
 }
+
+void MP1Node::sendGossip(Address *toAddr) {
+    int mleSize = sizeof(int) + sizeof(short) + sizeof(long) + sizeof(long), numEntries = memberNode->memberList.size();
+    size_t msgsize = sizeof(MessageHdr) + mleSize * numEntries;
+
+    MessageHdr *msg;
+    msg = (MessageHdr *) malloc(msgsize * sizeof(char));
+    msg->msgType = UPDATEREQ;
+
+    serializeMemberList(msg);
+
+    // Reply with UPDATEREQ message
+    emulNet->ENsend(&memberNode->addr, toAddr, (char *)msg, msgsize);
+
+    free(msg);
+}
+
+void MP1Node::serializeMemberList(MessageHdr* msg) {
+    int offset = 0;
+    int id = 0;
+    short port = 0;
+    setIdAndPortFromAddress(memberNode->addr, &id, &port);
+    long currTime = par->getcurrtime();
+    for(auto mle = memberNode->memberList.begin(); mle != memberNode->memberList.end(); ++mle) {
+        memcpy((char *)(msg+1) + offset, &mle->id, sizeof(int));
+        offset += sizeof(int);
+
+        memcpy((char *)(msg+1) + offset, &mle->port, sizeof(short));
+        offset += sizeof(short);
+
+        memcpy((char *)(msg+1) + offset, mle->id == id ? &(memberNode->heartbeat) : &(mle->heartbeat), sizeof(long));
+        offset += sizeof(long);
+
+        memcpy((char *)(msg+1) + offset, mle->id == id ? &currTime : &(mle->timestamp), sizeof(long));
+        offset += sizeof(long);
+    }
+}
+
+void MP1Node::deserializeAndUpdateMemberList(char *data, int size) {
+    // map of port, heartbeat, timestamp
+    auto map = createMemberlistMap();
+
+    auto currTime = par->getcurrtime();
+
+    int mleSize = sizeof(int) + sizeof(short) + sizeof(long) + sizeof(long);
+    int numEntries = (size - sizeof(MessageHdr)) / mleSize;
+    int offset = sizeof(MessageHdr);
+
+    for (int i = 0; i < numEntries; i++) {
+        // get the member list
+        int id = 0;
+        short port = 0;
+        long heartbeat = 0;
+        long timestamp = 0;
+
+        memcpy(&id, data + offset, sizeof(int));
+        offset += sizeof(int);
+
+        memcpy(&port, data + offset, sizeof(short));
+        offset += sizeof(short);
+
+        memcpy(&heartbeat, data + offset, sizeof(long));
+        offset += sizeof(long);
+
+        memcpy(&timestamp, data + offset, sizeof(long));
+        offset += sizeof(long);
+
+        // if member doesn't exist in current member list, we add it there
+//        MemberListEntry* old = getNodeFromMemberListTable(id);
+        if (map.count(id) == 0) {
+//        if (old == nullptr) {
+            MemberListEntry entry = MemberListEntry(id, port, heartbeat, currTime);
+            memberNode->memberList.push_back(entry);
+
+            // log the new mle join
+            Address addr = createAddressFromIdAndPort(id, port);
+            log->logNodeAdd(&memberNode->addr, &addr);
+        } else {
+            // update the existing member entry
+            auto old = map[id];
+            if (old->heartbeat < heartbeat) {
+                if (failed.count(id) > 0) {
+                    failed.erase(id);
+                }
+                old->setheartbeat(heartbeat);
+                old->settimestamp(currTime);
+            }
+        }
+    }
+}
+
 
 /**
  * FUNCTION NAME: isNullAddress
@@ -302,4 +497,38 @@ void MP1Node::printAddress(Address *addr)
 {
     printf("%d.%d.%d.%d:%d \n",  addr->addr[0],addr->addr[1],addr->addr[2],
                                                        addr->addr[3], *(short*)&addr->addr[4]) ;    
+}
+
+void MP1Node::setIdAndPortFromAddress(Address addr, int *id, short *port) {
+    memcpy(id, &addr.addr, sizeof(int));
+    memcpy(port, &addr.addr[4], sizeof(short));
+}
+
+Address MP1Node::createAddressFromIdAndPort(int id, short port) {
+    Address addr;
+    addr.init();
+    *(int *)(&(addr.addr))=id;
+    *(short *)(&(addr.addr[4]))=port;
+    return addr;
+}
+
+bool MP1Node::areAddressesEqual(Address addr1, Address addr2) {
+    return memcmp((char*)&addr1, (char*)&addr2, sizeof(Address)) == 0;
+}
+
+map<int, MemberListEntry*> MP1Node::createMemberlistMap() {
+    map<int, MemberListEntry*> map;
+    for (auto neighbour = memberNode->memberList.begin(); neighbour != memberNode->memberList.end(); neighbour++) {
+        map[neighbour->id] = &*neighbour;
+    }
+    return map;
+}
+
+MemberListEntry* MP1Node::getNodeFromMemberListTable(int id) {
+    for(auto mle = memberNode->memberList.begin(); mle != memberNode->memberList.end(); ++mle) {
+        if(mle->id == id) {
+            return mle.base();
+        }
+    }
+    return nullptr;
 }

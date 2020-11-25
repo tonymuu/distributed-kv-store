@@ -22,6 +22,9 @@
  */
 #define TREMOVE 20
 #define TFAIL 5
+#define TGOSSIP 5
+
+#define GOSSIP_SIZE 3
 
 /**
  * CLASS NAME: MP1Node
@@ -36,9 +39,10 @@ private:
 	Member *memberNode;
 	bool shouldDeleteMember;
 	char NULLADDR[6];
+	long timeLastGossip;
+	long localTimeStamp;
 
 public:
-
 	/**
 	 * Message Types
 	 */
@@ -78,7 +82,18 @@ public:
 	Address getJoinAddress();
 	void initMemberListTable(Member *memberNode);
 	void printAddress(Address *addr);
-	virtual ~MP1Node();
+    virtual ~MP1Node();
+
+    // My functions
+    void sendJoinRepMsg(Address *toAddr);
+    void sendGossip(Address *toAddr);
+    void setIdAndPortFromAddress(Address addr, int *id, short *port);
+    Address createAddressFromIdAndPort(int id, short port);
+    bool areAddressesEqual(Address addr1, Address addr2);
+    map<int, MemberListEntry*> createMemberlistMap();
+    void serializeMemberList(MessageHdr* msg);
+    void deserializeAndUpdateMemberList(char *data, int size);
+    MemberListEntry* getNodeFromMemberListTable(int id);
 };
 
 #endif /* _MP1NODE_H_ */
