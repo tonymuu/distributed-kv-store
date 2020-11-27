@@ -35,6 +35,8 @@ public:
     int txId;
     // type of transaction, which overlaps partially with MessageType
     MessageType type;
+    string key;
+    string value;
 
     Transaction(MessageType _type);
 };
@@ -116,8 +118,6 @@ public:
 
 	// my functions
     void sendMessage(Address toAddr, Message msg);
-    void logSuccess();
-    void logFailure();
 
     // message handlers
     void handleCreateMessage(Message msg);

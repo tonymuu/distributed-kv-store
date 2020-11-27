@@ -54,7 +54,7 @@ void MP2Node::updateRing() {
 	// Sort the list based on the hashCode
 	sort(curMemList.begin(), curMemList.end());
 
-
+	ring = curMemList;
 	/*
 	 * Step 3: Run the stabilization protocol IF REQUIRED
 	 */
@@ -113,6 +113,8 @@ size_t MP2Node::hashFunction(string key) {
 void MP2Node::clientCreate(string key, string value) {
     // start a transaction
     Transaction transaction(CREATE);
+    transaction.key = key;
+    transaction.value = value;
     txMap.emplace(transaction.txId, transaction);
 
     // send messages to all nodes who should hold the key
@@ -139,6 +141,7 @@ void MP2Node::clientRead(string key){
     // start a transaction
     Transaction transaction(READ);
     txMap.emplace(transaction.txId, transaction);
+    transaction.key = key;
 
     // send messages to all nodes who should hold the key
     auto nodes = findNodes(key);
@@ -164,6 +167,8 @@ void MP2Node::clientUpdate(string key, string value){
     // start a transaction
     Transaction transaction(UPDATE);
     txMap.emplace(transaction.txId, transaction);
+    transaction.key = key;
+    transaction.value = value;
 
     // send messages to all nodes who should hold the key
     auto nodes = findNodes(key);
@@ -189,6 +194,7 @@ void MP2Node::clientDelete(string key){
     // start a transaction
     Transaction transaction(DELETE);
     txMap.emplace(transaction.txId, transaction);
+    transaction.key = key;
 
     // send messages to all nodes who should hold the key
     auto nodes = findNodes(key);
@@ -212,7 +218,8 @@ void MP2Node::clientDelete(string key){
 bool MP2Node::createKeyValue(string key, string value, ReplicaType replica) {
 	// Insert key, value, replicaType into the hash table
 	Entry entry(value, this->par->getcurrtime(), replica);
-	return ht->create(key, entry.convertToString());
+	auto res = ht->create(key, entry.convertToString());
+	return res;
 }
 
 /**
@@ -287,8 +294,9 @@ void MP2Node::checkMessages() {
             case UPDATE: handleUpdateMessage(msg);
             case READ: handleReadMessage(msg);
             case DELETE: handleDeleteMessage(msg);
-            case REPLY: handleReplyMessage(msg);
-            case READREPLY: handleReadReplyMessage(msg);
+            case REPLY: case READREPLY:
+                handleReplyMessage(msg);
+//            case : handleReadReplyMessage(msg);
         }
 	}
 
@@ -407,8 +415,7 @@ void MP2Node::handleReadMessage(Message msg) {
         log->logReadFail(&msg.fromAddr, false, msg.transID, msg.key);
         reply.success = false;
     } else {
-        Entry entry(res);
-        log->logReadSuccess(&msg.fromAddr, false, msg.transID, msg.key, entry.value);
+        log->logReadSuccess(&msg.fromAddr, false, msg.transID, msg.key, res);
         reply.success = true;
     }
     sendMessage(msg.fromAddr, reply);
@@ -430,26 +437,27 @@ void MP2Node::handleReplyMessage(Message msg) {
     int txId = msg.transID;
     auto it = txMap.find(txId);
     if (it != txMap.end()) {
-        auto transaction = it->second;
-        transaction.totalCount++;
+        Transaction *transaction = &it->second;
+
+        transaction->totalCount++;
         if (msg.success) {
-            transaction.successCount++;
+            transaction->successCount++;
         }
-        if (transaction.successCount >= QUORUM) { // operation successful! log success as coordinator
+        if (transaction->successCount >= QUORUM) { // operation successful! log success as coordinator
             txMap.erase(txId);
-            switch (transaction.type) {
-                case READ: log->logReadSuccess(&memberNode->addr, true, txId, msg.key, msg.value);
-                case UPDATE: log->logUpdateSuccess(&memberNode->addr, true, txId, msg.key, msg.value);
-                case CREATE: log->logCreateSuccess(&memberNode->addr, true, txId, msg.key, msg.value);
-                case DELETE: log->logDeleteSuccess(&memberNode->addr, true, txId, msg.key);
+            switch (transaction->type) {
+                case READ: log->logReadSuccess(&memberNode->addr, true, txId, transaction->key, transaction->value);
+                case UPDATE: log->logUpdateSuccess(&memberNode->addr, true, txId, transaction->key, transaction->value);
+                case CREATE: log->logCreateSuccess(&memberNode->addr, true, txId, transaction->key, transaction->value);
+                case DELETE: log->logDeleteSuccess(&memberNode->addr, true, txId, transaction->key);
             }
-        } else if (transaction.successCount < QUORUM && transaction.totalCount == TOTAL) { // operation failed :( log failure as coordinator
+        } else if (transaction->successCount < QUORUM && transaction->totalCount == TOTAL) { // operation failed :( log failure as coordinator
             txMap.erase(txId);
-            switch (transaction.type) {
-                case READ: log->logReadFail(&memberNode->addr, true, txId, msg.key);
-                case UPDATE: log->logUpdateFail(&memberNode->addr, true, txId, msg.key, msg.value);
-                case CREATE: log->logCreateFail(&memberNode->addr, true, txId, msg.key, msg.value);
-                case DELETE: log->logDeleteFail(&memberNode->addr, true, txId, msg.key);
+            switch (transaction->type) {
+                case READ: log->logReadFail(&memberNode->addr, true, txId, transaction->key);
+                case UPDATE: log->logUpdateFail(&memberNode->addr, true, txId, transaction->key, transaction->value);
+                case CREATE: log->logCreateFail(&memberNode->addr, true, txId, transaction->key, transaction->value);
+                case DELETE: log->logDeleteFail(&memberNode->addr, true, txId, transaction->key);
             }
         }
     }
