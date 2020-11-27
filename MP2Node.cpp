@@ -59,6 +59,7 @@ void MP2Node::updateRing() {
 	 * Step 3: Run the stabilization protocol IF REQUIRED
 	 */
 	// Run stabilization protocol if the hash table size is greater than zero and if there has been a changed in the ring
+	stabilizationProtocol();
 }
 
 /**
@@ -110,9 +111,19 @@ size_t MP2Node::hashFunction(string key) {
 *                 3) Sends a message to the replica
 */
 void MP2Node::clientCreate(string key, string value) {
-	/*
-	* Implement this
-	*/
+    // start a transaction
+    Transaction transaction(CREATE);
+    txMap.emplace(transaction.txId, transaction);
+
+    // send messages to all nodes who should hold the key
+    auto nodes = findNodes(key);
+    int txId = transaction.txId;
+    for (int i = 0; i < nodes.size(); i++) {
+        auto node = nodes[i];
+        Message msg(txId, memberNode->addr, CREATE, key, value);
+        msg.replica = static_cast<ReplicaType>(i);
+        sendMessage(node.nodeAddress, msg);
+    }
 }
 
 /**
@@ -125,9 +136,19 @@ void MP2Node::clientCreate(string key, string value) {
 *                 3) Sends a message to the replica
 */
 void MP2Node::clientRead(string key){
-	/*
-	* Implement this
-	*/
+    // start a transaction
+    Transaction transaction(READ);
+    txMap.emplace(transaction.txId, transaction);
+
+    // send messages to all nodes who should hold the key
+    auto nodes = findNodes(key);
+    int txId = transaction.txId;
+    for (int i = 0; i < nodes.size(); i++) {
+        auto node = nodes[i];
+        Message msg(txId, memberNode->addr, READ, key);
+        msg.replica = static_cast<ReplicaType>(i);
+        sendMessage(node.nodeAddress, msg);
+    }
 }
 
 /**
@@ -140,9 +161,19 @@ void MP2Node::clientRead(string key){
 *                 3) Sends a message to the replica
 */
 void MP2Node::clientUpdate(string key, string value){
-	/*
-    * Implement this
-    */
+    // start a transaction
+    Transaction transaction(UPDATE);
+    txMap.emplace(transaction.txId, transaction);
+
+    // send messages to all nodes who should hold the key
+    auto nodes = findNodes(key);
+    int txId = transaction.txId;
+    for (int i = 0; i < nodes.size(); i++) {
+        auto node = nodes[i];
+        Message msg(txId, memberNode->addr, UPDATE, key, value);
+        msg.replica = static_cast<ReplicaType>(i);
+        sendMessage(node.nodeAddress, msg);
+    }
 }
 
 /**
@@ -155,9 +186,19 @@ void MP2Node::clientUpdate(string key, string value){
 *                 3) Sends a message to the replica
 */
 void MP2Node::clientDelete(string key){
-	/*
-	* Implement this
-	*/
+    // start a transaction
+    Transaction transaction(DELETE);
+    txMap.emplace(transaction.txId, transaction);
+
+    // send messages to all nodes who should hold the key
+    auto nodes = findNodes(key);
+    int txId = transaction.txId;
+    for (int i = 0; i < nodes.size(); i++) {
+        auto node = nodes[i];
+        Message msg(txId, memberNode->addr, DELETE, key);
+        msg.replica = static_cast<ReplicaType>(i);
+        sendMessage(node.nodeAddress, msg);
+    }
 }
 
 /**
@@ -169,10 +210,9 @@ void MP2Node::clientDelete(string key){
 *                    2) Return true or false based on success or failure
 */
 bool MP2Node::createKeyValue(string key, string value, ReplicaType replica) {
-	/*
-	 * Implement this
-	 */
 	// Insert key, value, replicaType into the hash table
+	Entry entry(value, this->par->getcurrtime(), replica);
+	return ht->create(key, entry.convertToString());
 }
 
 /**
@@ -184,10 +224,13 @@ bool MP2Node::createKeyValue(string key, string value, ReplicaType replica) {
 *                 2) Return value
 */
 string MP2Node::readKey(string key) {
-	/*
-	 * Implement this
-	 */
 	// Read key from local hash table and return value
+	auto val = ht->read(key);
+	if (val.empty()) {
+	    return val;
+	}
+	Entry entry(val);
+	return entry.value;
 }
 
 /**
@@ -199,10 +242,9 @@ string MP2Node::readKey(string key) {
 *                 2) Return true or false based on success or failure
 */
 bool MP2Node::updateKeyValue(string key, string value, ReplicaType replica) {
-	/*
-	 * Implement this
-	 */
 	// Update key in local hash table and return true or false
+    Entry entry(value, par->getcurrtime(), replica);
+    return ht->update(key, entry.convertToString());
 }
 
 /**
@@ -214,10 +256,8 @@ bool MP2Node::updateKeyValue(string key, string value, ReplicaType replica) {
 *                 2) Return true or false based on success or failure
 */
 bool MP2Node::deletekey(string key) {
-	/*
-	 * Implement this
-	 */
 	// Delete the key from the local hash table
+	return ht->deleteKey(key);
 }
 
 /**
@@ -229,30 +269,27 @@ bool MP2Node::deletekey(string key) {
 *                 2) Handles the messages according to message types
 */
 void MP2Node::checkMessages() {
-	/*
-	* Implement this. Parts of it are already implemented
-	*/
 	char * data;
 	int size;
 
-	/*
-	* Declare your local variables here
-	*/
-
 	// dequeue all messages and handle them
 	while ( !memberNode->mp2q.empty() ) {
-		/*
-		 * Pop a message from the queue
-		 */
+	    // Pop a message from the queue
 		data = (char *)memberNode->mp2q.front().elt;
 		size = memberNode->mp2q.front().size;
 		memberNode->mp2q.pop();
 
-		string message(data, data + size);
-
-		/*
-		 * Handle the message types here
-		 */
+		string strMsg(data, data + size);
+		Message msg(strMsg);
+		// Handle the message types here
+        switch (msg.type) {
+            case CREATE: handleCreateMessage(msg);
+            case UPDATE: handleUpdateMessage(msg);
+            case READ: handleReadMessage(msg);
+            case DELETE: handleDeleteMessage(msg);
+            case REPLY: handleReplyMessage(msg);
+            case READREPLY: handleReadReplyMessage(msg);
+        }
 	}
 
 	/*
@@ -324,10 +361,108 @@ int MP2Node::enqueueWrapper(void *env, char *buff, int size) {
 *                 It ensures that there always 3 copies of all keys in the DHT at all times
 *                 The function does the following:
 *                1) Ensures that there are three "CORRECT" replicas of all the keys in spite of failures and joins
-*                Note:- "CORRECT" replicas implies that every key is replicated in its two neighboring nodes in the ring
+*                Note:- "CORRECT" replicas implies that every key is replicated in its two neighboring nodes in the ring.
+ *
+ *                This function gets run
+ *
 */
 void MP2Node::stabilizationProtocol() {
-	/*
-	* Implement this
-	*/
+
+}
+
+
+// my functions
+void MP2Node::sendMessage(Address toAddr, Message msg) {
+    emulNet->ENsend(&memberNode->addr, &toAddr, msg.toString());
+}
+
+void MP2Node::handleCreateMessage(Message msg) {
+    Message reply(msg.transID, memberNode->addr, REPLY, msg.key, msg.value, msg.replica);
+    if (!createKeyValue(msg.key, msg.value, msg.replica)) {
+        log->logCreateFail(&msg.fromAddr, false, msg.transID, msg.key, msg.value);
+        reply.success = false;
+    } else {
+        log->logCreateSuccess(&msg.fromAddr, false, msg.transID, msg.key, msg.value);
+        reply.success = true;
+    }
+    sendMessage(msg.fromAddr, reply);
+}
+
+void MP2Node::handleUpdateMessage(Message msg) {
+    Message reply(msg.transID, memberNode->addr, REPLY, msg.key, msg.value, msg.replica);
+    if (!updateKeyValue(msg.key, msg.value, msg.replica)) {
+        log->logUpdateFail(&msg.fromAddr, false, msg.transID, msg.key, msg.value);
+        reply.success = false;
+    } else {
+        log->logUpdateSuccess(&msg.fromAddr, false, msg.transID, msg.key, msg.value);
+        reply.success = true;
+    }
+    sendMessage(msg.fromAddr, reply);
+}
+
+void MP2Node::handleReadMessage(Message msg) {
+    string res = readKey(msg.key);
+    Message reply(msg.transID, memberNode->addr, READREPLY, msg.key, msg.value, msg.replica);
+    if (res.empty()) {
+        log->logReadFail(&msg.fromAddr, false, msg.transID, msg.key);
+        reply.success = false;
+    } else {
+        Entry entry(res);
+        log->logReadSuccess(&msg.fromAddr, false, msg.transID, msg.key, entry.value);
+        reply.success = true;
+    }
+    sendMessage(msg.fromAddr, reply);
+}
+
+void MP2Node::handleDeleteMessage(Message msg) {
+    Message reply(msg.transID, memberNode->addr, REPLY, msg.key, msg.value, msg.replica);
+    if (!deletekey(msg.key)) {
+        log->logDeleteFail(&msg.fromAddr, false, msg.transID, msg.key);
+        reply.success = false;
+    } else {
+        log->logDeleteSuccess(&msg.fromAddr, false, msg.transID, msg.key);
+        reply.success = true;
+    }
+    sendMessage(msg.fromAddr, reply);
+}
+
+void MP2Node::handleReplyMessage(Message msg) {
+    int txId = msg.transID;
+    auto it = txMap.find(txId);
+    if (it != txMap.end()) {
+        auto transaction = it->second;
+        transaction.totalCount++;
+        if (msg.success) {
+            transaction.successCount++;
+        }
+        if (transaction.successCount >= QUORUM) { // operation successful! log success as coordinator
+            txMap.erase(txId);
+            switch (transaction.type) {
+                case READ: log->logReadSuccess(&memberNode->addr, true, txId, msg.key, msg.value);
+                case UPDATE: log->logUpdateSuccess(&memberNode->addr, true, txId, msg.key, msg.value);
+                case CREATE: log->logCreateSuccess(&memberNode->addr, true, txId, msg.key, msg.value);
+                case DELETE: log->logDeleteSuccess(&memberNode->addr, true, txId, msg.key);
+            }
+        } else if (transaction.successCount < QUORUM && transaction.totalCount == TOTAL) { // operation failed :( log failure as coordinator
+            txMap.erase(txId);
+            switch (transaction.type) {
+                case READ: log->logReadFail(&memberNode->addr, true, txId, msg.key);
+                case UPDATE: log->logUpdateFail(&memberNode->addr, true, txId, msg.key, msg.value);
+                case CREATE: log->logCreateFail(&memberNode->addr, true, txId, msg.key, msg.value);
+                case DELETE: log->logDeleteFail(&memberNode->addr, true, txId, msg.key);
+            }
+        }
+    }
+    // otherwise, we don't do anything, since if transaction doesn't exist in the map, it's already resolved
+}
+
+void MP2Node::handleReadReplyMessage(Message msg) {
+
+}
+
+Transaction::Transaction(MessageType _type) {
+    this->successCount = 0;
+    this->totalCount = 0;
+    this->type = _type;
+    this->txId = g_transID++;
 }

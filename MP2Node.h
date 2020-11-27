@@ -9,6 +9,9 @@
 #ifndef MP2NODE_H_
 #define MP2NODE_H_
 
+#define QUORUM 2
+#define TOTAL 3
+
 /**
  * Header files
  */
@@ -21,6 +24,20 @@
 #include "Member.h"
 #include "Message.h"
 #include "Queue.h"
+
+class Transaction {
+public:
+    // how many success does the transaction have (for quorum calculation)
+    int successCount;
+    // how many replies received
+    int totalCount;
+    // transaction id
+    int txId;
+    // type of transaction, which overlaps partially with MessageType
+    MessageType type;
+
+    Transaction(MessageType _type);
+};
 
 /**
  * CLASS NAME: MP2Node
@@ -41,6 +58,7 @@ private:
 	// Ring
 	vector<Node> ring;
 	// Hash Table
+	// the value is serialized in the format of "value:timestamp:replicaType", should use Entry's converToString to serialize
 	HashTable * ht;
 	// Member representing this member
 	Member *memberNode;
@@ -54,6 +72,8 @@ private:
 	string delimiter;
 	// Transaction map
 	map<int, Message>transMap;
+	// maps txid => success reply count
+	map<int, Transaction> txMap;
 
 public:
 	MP2Node(Member *memberNode, Params *par, EmulNet *emulNet, Log *log, Address *addressOfMember);
@@ -93,8 +113,46 @@ public:
 
 	// stabilization protocol - handle multiple failures
 	void stabilizationProtocol();
-	
+
+	// my functions
+    void sendMessage(Address toAddr, Message msg);
+    void logSuccess();
+    void logFailure();
+
+    // message handlers
+    void handleCreateMessage(Message msg);
+    void handleUpdateMessage(Message msg);
+    void handleReadMessage(Message msg);
+    void handleDeleteMessage(Message msg);
+    void handleReplyMessage(Message msg);
+    void handleReadReplyMessage(Message msg);
+
 	~MP2Node();
 };
 
 #endif /* MP2NODE_H_ */
+
+/*
+ * checkMessage:
+ *   create message received: create kv pairs for my hashtable, log success/failure, send back reply if success
+ *   read message received: read from my ht, log, send reply if success
+ *   update/delete: perform action, log, send reply if success
+ *   reply: count if quorum is reached (2), log success/fail
+ *   read reply: count if quorum reached, log success/fail, return value
+ *
+ * For each client ops, create a transaction and save it in the txMap with txid (g_transId), increment too
+ * During check message, when receive reply/replayread msg, update transaction accordingly (totalRcv vs successRcv) and
+ * fail this transaction if no reach quorum
+ *
+ *
+ * client ops:
+ *   create: create a txid, findNodes for the given key, send messages to these nodes with txid
+ *   update: similar to create but different message type
+ *   read: similar
+ *   delete: similar
+ *
+ *
+ *
+ *
+ *
+ * */
