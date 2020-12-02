@@ -37,9 +37,6 @@ MP2Node::~MP2Node() {
 *                 3) Calls the Stabilization Protocol
 */
 void MP2Node::updateRing() {
-	/*
-     * Implement this. Parts of it are already implemented
-     */
     vector<Node> curMemList;
     bool change = false;
 
@@ -53,9 +50,13 @@ void MP2Node::updateRing() {
 	 */
 	// Sort the list based on the hashCode
 	sort(curMemList.begin(), curMemList.end());
+
+	// Check if the ring has changes
 	if (curMemList.size() != ring.size()) {
+        // if the current membership ring and my ring doesn't have the same size, then it must have changed
 	    change = true;
 	} else {
+	    // go through each node in the two rings and check if they the same hash
         for (int i = 0; i < ring.size(); i++) {
             if (ring.at(i).getHashCode() != curMemList.at(i).getHashCode()) {
                 change = true;
@@ -68,18 +69,24 @@ void MP2Node::updateRing() {
 	 * Step 3: Run the stabilization protocol IF REQUIRED
 	 */
 	// Run stabilization protocol if the hash table size is greater than zero and if there has been a changed in the ring
-	if (change && ht->currentSize() > 0) {
+	if (change) {
         stabilizationProtocol();
 	}
 
+	// Also update the transaction map to see if any has been successful or failed
 	updateTransactionMap();
 }
 
 void MP2Node::updateTransactionMap() {
-    if (txMap.empty()) return;
+    if (txMap.empty()) { // nothing to check here
+        return;
+    }
+    // Go through each entry in the transaction map
     for (auto it = txMap.begin(); it != txMap.end();) {
         int txId = it->first;
         Transaction *transaction = &it->second;
+
+        // if this transaction has enough successful replies, log success
         if (transaction->successCount >= QUORUM) { // operation successful! log success as coordinator
             switch (transaction->type) {
                 case READ:
@@ -100,6 +107,8 @@ void MP2Node::updateTransactionMap() {
             txMap.erase(it++);
             continue;
         }
+        // This transaction DOES NOT have enough success replies...
+        // So we check if it has reached maximum replies, or it has timed out
         if (transaction->totalCount == TOTAL || par->getcurrtime() - transaction->timestamp > OPERATION_TIMEOUT) { // operation failed :( log failure as coordinator
             switch (transaction->type) {
                 case READ:
@@ -120,7 +129,8 @@ void MP2Node::updateTransactionMap() {
             txMap.erase(it++);
             continue;
         }
-        // otherwise, we don't do anything, since if transaction doesn't exist in the map, it's already resolved
+        // otherwise, we don't do anything
+        // since if transaction doesn't exist in the map, it's already resolved
         it++;
     }
 }
@@ -450,10 +460,11 @@ int MP2Node::enqueueWrapper(void *env, char *buff, int size) {
  *
 */
 void MP2Node::stabilizationProtocol() {
-    for (auto pair : ht->retPrimaryPairs()) {
+    for (auto pair : ht->hashTable) {
         auto nodes = findNodes(pair.first);
-        for (int i = 0; i < nodes.size(); i++) {
-            Message msg(-1, memberNode->addr, CREATE, pair.first, pair.second, static_cast<ReplicaType>(i));
+        for (auto node : nodes) {
+            Message msg(-1, memberNode->addr, CREATE, pair.first, pair.second);
+            sendMessage(*node.getAddress(), msg);
         }
     }
 }
