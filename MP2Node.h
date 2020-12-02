@@ -11,6 +11,7 @@
 
 #define QUORUM 2
 #define TOTAL 3
+#define OPERATION_TIMEOUT 20
 
 /**
  * Header files
@@ -33,12 +34,14 @@ public:
     int totalCount;
     // transaction id
     int txId;
+    // timestamp this transaction was created
+    int timestamp;
     // type of transaction, which overlaps partially with MessageType
     MessageType type;
     string key;
     string value;
 
-    Transaction(MessageType _type);
+    Transaction(MessageType _type, int timestamp);
 };
 
 /**

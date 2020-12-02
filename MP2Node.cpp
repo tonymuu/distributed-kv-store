@@ -53,13 +53,24 @@ void MP2Node::updateRing() {
 	 */
 	// Sort the list based on the hashCode
 	sort(curMemList.begin(), curMemList.end());
+	if (curMemList.size() != ring.size()) {
+	    change = true;
+	} else {
+        for (int i = 0; i < ring.size(); i++) {
+            if (ring.at(i).getHashCode() != curMemList.at(i).getHashCode()) {
+                change = true;
+            }
+        }
+	}
 
 	ring = curMemList;
 	/*
 	 * Step 3: Run the stabilization protocol IF REQUIRED
 	 */
 	// Run stabilization protocol if the hash table size is greater than zero and if there has been a changed in the ring
-	stabilizationProtocol();
+	if (change && ht->currentSize() > 0) {
+        stabilizationProtocol();
+	}
 }
 
 /**
@@ -112,7 +123,7 @@ size_t MP2Node::hashFunction(string key) {
 */
 void MP2Node::clientCreate(string key, string value) {
     // start a transaction
-    Transaction transaction(CREATE);
+    Transaction transaction(CREATE, par->getcurrtime());
     transaction.key = key;
     transaction.value = value;
     txMap.emplace(transaction.txId, transaction);
@@ -139,9 +150,9 @@ void MP2Node::clientCreate(string key, string value) {
 */
 void MP2Node::clientRead(string key){
     // start a transaction
-    Transaction transaction(READ);
-    txMap.emplace(transaction.txId, transaction);
+    Transaction transaction(READ, par->getcurrtime());
     transaction.key = key;
+    txMap.emplace(transaction.txId, transaction);
 
     // send messages to all nodes who should hold the key
     auto nodes = findNodes(key);
@@ -165,10 +176,10 @@ void MP2Node::clientRead(string key){
 */
 void MP2Node::clientUpdate(string key, string value){
     // start a transaction
-    Transaction transaction(UPDATE);
-    txMap.emplace(transaction.txId, transaction);
+    Transaction transaction(UPDATE, par->getcurrtime());
     transaction.key = key;
     transaction.value = value;
+    txMap.emplace(transaction.txId, transaction);
 
     // send messages to all nodes who should hold the key
     auto nodes = findNodes(key);
@@ -192,9 +203,9 @@ void MP2Node::clientUpdate(string key, string value){
 */
 void MP2Node::clientDelete(string key){
     // start a transaction
-    Transaction transaction(DELETE);
-    txMap.emplace(transaction.txId, transaction);
+    Transaction transaction(DELETE, par->getcurrtime());
     transaction.key = key;
+    txMap.emplace(transaction.txId, transaction);
 
     // send messages to all nodes who should hold the key
     auto nodes = findNodes(key);
@@ -288,15 +299,27 @@ void MP2Node::checkMessages() {
 
 		string strMsg(data, data + size);
 		Message msg(strMsg);
+
 		// Handle the message types here
         switch (msg.type) {
-            case CREATE: handleCreateMessage(msg);
-            case UPDATE: handleUpdateMessage(msg);
-            case READ: handleReadMessage(msg);
-            case DELETE: handleDeleteMessage(msg);
-            case REPLY: case READREPLY:
+            case CREATE:
+                handleCreateMessage(msg);
+                break;
+            case UPDATE:
+                handleUpdateMessage(msg);
+                break;
+            case READ:
+                handleReadMessage(msg);
+                break;
+            case DELETE:
+                handleDeleteMessage(msg);
+                break;
+            case REPLY:
+            case READREPLY:
                 handleReplyMessage(msg);
-//            case : handleReadReplyMessage(msg);
+                break;
+            default:
+                break;
         }
 	}
 
@@ -371,11 +394,16 @@ int MP2Node::enqueueWrapper(void *env, char *buff, int size) {
 *                1) Ensures that there are three "CORRECT" replicas of all the keys in spite of failures and joins
 *                Note:- "CORRECT" replicas implies that every key is replicated in its two neighboring nodes in the ring.
  *
- *                This function gets run
+ *                We only want to replicate primary copies for each node
  *
 */
 void MP2Node::stabilizationProtocol() {
-
+    for (auto pair : ht->retPrimaryPairs()) {
+        auto nodes = findNodes(pair.first);
+        for (int i = 0; i < nodes.size(); i++) {
+            Message msg(-1, memberNode->addr, CREATE, pair.first, pair.second, static_cast<ReplicaType>(i));
+        }
+    }
 }
 
 
@@ -410,7 +438,7 @@ void MP2Node::handleUpdateMessage(Message msg) {
 
 void MP2Node::handleReadMessage(Message msg) {
     string res = readKey(msg.key);
-    Message reply(msg.transID, memberNode->addr, READREPLY, msg.key, msg.value, msg.replica);
+    Message reply(msg.transID, memberNode->addr, READREPLY, msg.key, res, msg.replica);
     if (res.empty()) {
         log->logReadFail(&msg.fromAddr, false, msg.transID, msg.key);
         reply.success = false;
@@ -436,29 +464,54 @@ void MP2Node::handleDeleteMessage(Message msg) {
 void MP2Node::handleReplyMessage(Message msg) {
     int txId = msg.transID;
     auto it = txMap.find(txId);
+
     if (it != txMap.end()) {
         Transaction *transaction = &it->second;
 
         transaction->totalCount++;
-        if (msg.success) {
+        // READREPLY messages don't use success field, they use value field instead (if fail value is null)
+        // see Message(string str) constructor
+        if (msg.success || (msg.type == READREPLY && !msg.value.empty())) {
             transaction->successCount++;
         }
         if (transaction->successCount >= QUORUM) { // operation successful! log success as coordinator
-            txMap.erase(txId);
             switch (transaction->type) {
-                case READ: log->logReadSuccess(&memberNode->addr, true, txId, transaction->key, transaction->value);
-                case UPDATE: log->logUpdateSuccess(&memberNode->addr, true, txId, transaction->key, transaction->value);
-                case CREATE: log->logCreateSuccess(&memberNode->addr, true, txId, transaction->key, transaction->value);
-                case DELETE: log->logDeleteSuccess(&memberNode->addr, true, txId, transaction->key);
+                case READ:
+                    log->logReadSuccess(&memberNode->addr, true, txId, transaction->key, msg.value);
+                    break;
+                case UPDATE:
+                    log->logUpdateSuccess(&memberNode->addr, true, txId, transaction->key, transaction->value);
+                    break;
+                case CREATE:
+                    log->logCreateSuccess(&memberNode->addr, true, txId, transaction->key, transaction->value);
+                    break;
+                case DELETE:
+                    log->logDeleteSuccess(&memberNode->addr, true, txId, transaction->key);
+                    break;
+                default:
+                    break;
             }
-        } else if (transaction->successCount < QUORUM && transaction->totalCount == TOTAL) { // operation failed :( log failure as coordinator
             txMap.erase(txId);
+        } else if ((transaction->successCount < QUORUM && transaction->totalCount == TOTAL) || par->getcurrtime() - transaction->timestamp > OPERATION_TIMEOUT) { // operation failed :( log failure as coordinator
             switch (transaction->type) {
-                case READ: log->logReadFail(&memberNode->addr, true, txId, transaction->key);
-                case UPDATE: log->logUpdateFail(&memberNode->addr, true, txId, transaction->key, transaction->value);
-                case CREATE: log->logCreateFail(&memberNode->addr, true, txId, transaction->key, transaction->value);
-                case DELETE: log->logDeleteFail(&memberNode->addr, true, txId, transaction->key);
+                case READ:
+                    log->logReadFail(&memberNode->addr, true, txId, transaction->key);
+                    break;
+                case UPDATE:
+                    log->logUpdateFail(&memberNode->addr, true, txId, transaction->key, transaction->value);
+                    break;
+                case CREATE:
+                    log->logCreateFail(&memberNode->addr, true, txId, transaction->key, transaction->value);
+                    break;
+                case DELETE:
+                    log->logDeleteFail(&memberNode->addr, true, txId, transaction->key);
+                    break;
+                default:
+                    break;
             }
+        }
+        if (transaction->totalCount == TOTAL || par->getcurrtime() - transaction->timestamp > OPERATION_TIMEOUT) {
+            txMap.erase(txId);
         }
     }
     // otherwise, we don't do anything, since if transaction doesn't exist in the map, it's already resolved
@@ -468,7 +521,7 @@ void MP2Node::handleReadReplyMessage(Message msg) {
 
 }
 
-Transaction::Transaction(MessageType _type) {
+Transaction::Transaction(MessageType _type, int timestamp) {
     this->successCount = 0;
     this->totalCount = 0;
     this->type = _type;
