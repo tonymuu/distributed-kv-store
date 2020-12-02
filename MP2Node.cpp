@@ -71,6 +71,58 @@ void MP2Node::updateRing() {
 	if (change && ht->currentSize() > 0) {
         stabilizationProtocol();
 	}
+
+	updateTransactionMap();
+}
+
+void MP2Node::updateTransactionMap() {
+    if (txMap.empty()) return;
+    for (auto it = txMap.begin(); it != txMap.end();) {
+        int txId = it->first;
+        Transaction *transaction = &it->second;
+        if (transaction->successCount >= QUORUM) { // operation successful! log success as coordinator
+            switch (transaction->type) {
+                case READ:
+                    log->logReadSuccess(&memberNode->addr, true, txId, transaction->key, transaction->value);
+                    break;
+                case UPDATE:
+                    log->logUpdateSuccess(&memberNode->addr, true, txId, transaction->key, transaction->value);
+                    break;
+                case CREATE:
+                    log->logCreateSuccess(&memberNode->addr, true, txId, transaction->key, transaction->value);
+                    break;
+                case DELETE:
+                    log->logDeleteSuccess(&memberNode->addr, true, txId, transaction->key);
+                    break;
+                default:
+                    break;
+            }
+            txMap.erase(it++);
+            continue;
+        }
+        if (transaction->totalCount == TOTAL || par->getcurrtime() - transaction->timestamp > OPERATION_TIMEOUT) { // operation failed :( log failure as coordinator
+            switch (transaction->type) {
+                case READ:
+                    log->logReadFail(&memberNode->addr, true, txId, transaction->key);
+                    break;
+                case UPDATE:
+                    log->logUpdateFail(&memberNode->addr, true, txId, transaction->key, transaction->value);
+                    break;
+                case CREATE:
+                    log->logCreateFail(&memberNode->addr, true, txId, transaction->key, transaction->value);
+                    break;
+                case DELETE:
+                    log->logDeleteFail(&memberNode->addr, true, txId, transaction->key);
+                    break;
+                default:
+                    break;
+            }
+            txMap.erase(it++);
+            continue;
+        }
+        // otherwise, we don't do anything, since if transaction doesn't exist in the map, it's already resolved
+        it++;
+    }
 }
 
 /**
@@ -471,50 +523,13 @@ void MP2Node::handleReplyMessage(Message msg) {
         transaction->totalCount++;
         // READREPLY messages don't use success field, they use value field instead (if fail value is null)
         // see Message(string str) constructor
-        if (msg.success || (msg.type == READREPLY && !msg.value.empty())) {
+        if (msg.type == READREPLY && !msg.value.empty()) {
+            transaction->successCount++;
+            transaction->value = msg.value;
+        } else if (msg.success) {
             transaction->successCount++;
         }
-        if (transaction->successCount >= QUORUM) { // operation successful! log success as coordinator
-            switch (transaction->type) {
-                case READ:
-                    log->logReadSuccess(&memberNode->addr, true, txId, transaction->key, msg.value);
-                    break;
-                case UPDATE:
-                    log->logUpdateSuccess(&memberNode->addr, true, txId, transaction->key, transaction->value);
-                    break;
-                case CREATE:
-                    log->logCreateSuccess(&memberNode->addr, true, txId, transaction->key, transaction->value);
-                    break;
-                case DELETE:
-                    log->logDeleteSuccess(&memberNode->addr, true, txId, transaction->key);
-                    break;
-                default:
-                    break;
-            }
-            txMap.erase(txId);
-        } else if ((transaction->successCount < QUORUM && transaction->totalCount == TOTAL) || par->getcurrtime() - transaction->timestamp > OPERATION_TIMEOUT) { // operation failed :( log failure as coordinator
-            switch (transaction->type) {
-                case READ:
-                    log->logReadFail(&memberNode->addr, true, txId, transaction->key);
-                    break;
-                case UPDATE:
-                    log->logUpdateFail(&memberNode->addr, true, txId, transaction->key, transaction->value);
-                    break;
-                case CREATE:
-                    log->logCreateFail(&memberNode->addr, true, txId, transaction->key, transaction->value);
-                    break;
-                case DELETE:
-                    log->logDeleteFail(&memberNode->addr, true, txId, transaction->key);
-                    break;
-                default:
-                    break;
-            }
-        }
-        if (transaction->totalCount == TOTAL || par->getcurrtime() - transaction->timestamp > OPERATION_TIMEOUT) {
-            txMap.erase(txId);
-        }
     }
-    // otherwise, we don't do anything, since if transaction doesn't exist in the map, it's already resolved
 }
 
 void MP2Node::handleReadReplyMessage(Message msg) {
@@ -526,4 +541,5 @@ Transaction::Transaction(MessageType _type, int timestamp) {
     this->totalCount = 0;
     this->type = _type;
     this->txId = g_transID++;
+    this->timestamp = timestamp;
 }

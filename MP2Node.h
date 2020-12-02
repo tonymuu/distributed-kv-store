@@ -121,6 +121,7 @@ public:
 
 	// my functions
     void sendMessage(Address toAddr, Message msg);
+    void updateTransactionMap();
 
     // message handlers
     void handleCreateMessage(Message msg);
